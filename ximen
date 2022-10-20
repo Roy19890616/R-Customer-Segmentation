@@ -1,0 +1,93 @@
+#load all the packages
+library(dplyr)
+library(tidyr)
+library(haven)
+library(stringr)
+library(readr)
+
+## Read the invoice data and save as "new_ximen"
+new_ximen <- read_csv("~/OneDrive - alum.ccu.edu.tw/Data Competition/DataStation/Data/05_發票數據/1007/new_ximen.csv")
+
+## Create a new invoice data set which lists idependent consumption event in each row 
+ximen <- new_ximen %>%
+  mutate(classfication = case_when(store_name == "萊爾富(北市獅子林店)" ~ "連鎖超商超市", 
+                                   store_name == "麥當勞昆明旗艦店" ~ "巷弄美食餐廳",
+                                   TRUE ~ classfication)) %>%
+  group_by(invoice_serialno, memberno, invoice_createtime, gender, age, store_name, classfication) %>%
+  summarise(amount = sum(item_price)) %>%
+  mutate(date = as.Date(invoice_createtime)) %>%
+  ungroup() %>%
+  drop_na(classfication)
+
+## Create the dummy variables for each category
+ximen_tag <- ximen %>%
+  ungroup() %>%
+  select(memberno, classfication) %>%
+  mutate(values = 1) %>%
+  pivot_wider(
+    names_from = classfication,
+    values_from = values,
+    values_fn = list
+  ) %>%
+  mutate(cvs = case_when( nchar(連鎖超商超市) == 4 ~ 0, nchar(連鎖超商超市) != 4 ~ 1),
+         food = case_when( nchar(巷弄美食餐廳) == 4 ~ 0, nchar(巷弄美食餐廳) != 4 ~ 1),
+         movie = case_when( nchar(音樂電影娛樂) == 4 ~ 0, nchar(音樂電影娛樂) != 4 ~ 1),
+         drink = case_when( nchar(手搖飲料飲品) == 4 ~ 0, nchar(手搖飲料飲品) != 4 ~ 1),
+         cloth = case_when( nchar(精品服飾配件) == 4 ~ 0, nchar(精品服飾配件) != 4 ~ 1),
+         other = case_when( nchar(其它) == 4 ~ 0, nchar(其它) != 4 ~ 1),
+         hotel = case_when( nchar(絕佳特色飯店) == 4 ~ 0, nchar(絕佳特色飯店) != 4 ~ 1),
+         art = case_when( nchar(手創藝文商品) == 4 ~ 0, nchar(手創藝文商品) != 4 ~ 1),
+         department = case_when( nchar(流行生活百貨) == 4 ~ 0, nchar(流行生活百貨) != 4 ~ 1),
+         park = case_when( nchar(停車場) == 4 ~ 0, nchar(停車場) != 4 ~ 1),
+         hair = case_when( nchar(美容美髮彩妝) == 4 ~ 0, nchar(美容美髮彩妝) != 4 ~ 1)) %>%
+  select(memberno, cvs:hair)
+
+## Create a member data set which include basic information and historical 
+## trading tag of each member
+ximen_member <- ximen %>%
+  group_by(memberno, gender, age) %>%
+  summarise(amount = sum(amount), freq = n()) %>%
+  mutate(avg_price = amount / freq) %>%
+  left_join(ximen_tag, by = "memberno")
+
+## In order to use the cluster model, we normalize the amount, freq, avg_price, and age variables
+ximen_member_l <- ximen_member %>% 
+  ungroup() %>% 
+  mutate(amount = scale(amount)[1],
+         freq = scale(freq)[1],
+         avg_price = scale(avg_price)[1],
+         age = scale(age)[1] ) %>%
+  select(-memberno)
+
+
+wss <- 0
+## For 1 to 15 cluster centers
+for (i in 1:15) {
+  km.out <- kmeans(ximen_member_l, centers = i, nstart = 20)
+  # Save total within sum of squares to wss variable
+  wss[i] <- km.out$tot.withinss
+}
+
+## Plot total within sum of squares vs. number of clusters
+plot(1:15, wss, type = "b", 
+     xlab = "Number of Clusters", 
+     ylab = "Within groups sum of squares")
+
+## Build a Kmeans model to sort the members into several clusters,
+## and add the cluster result back to ximen_member data set
+km.out <- kmeans(ximen_member_l, centers = 9, nstart = 20)
+ximen_member <- ximen_member %>% 
+  ungroup() %>%
+  mutate(group = km.out$cluster)
+
+## Count the number in each group
+cluster_num <- ximen_member %>%
+  group_by(group) %>%
+  summarise(n = n())
+
+## Calculate the mean for each behaviour in each group
+cluster_result <- ximen_member %>%
+  select(-memberno) %>%
+  group_by(group) %>%
+  summarise_all(list(mean)) %>%
+  left_join(cluster_num, on = group)
